@@ -14,6 +14,9 @@ import (
 	"github.com/clovapi/switcher/internal/config"
 )
 
+// Allow the helper's 32-second retry window plus PowerShell cold startup on CI.
+const windowsReplaceTestTimeout = 45 * time.Second
+
 func TestDeferredWindowsReplace(t *testing.T) {
 	for _, name := range []string{"plain", "space [literal] $value 'quote' 中文"} {
 		t.Run(name, func(t *testing.T) {
@@ -29,14 +32,14 @@ func TestDeferredWindowsReplace(t *testing.T) {
 			if err := os.WriteFile(pending, []byte("new"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), windowsReplaceTestTimeout)
 			defer cancel()
 			script := deferredReplaceScript(target, pending, filepath.Join(dir, "missing.exe"), 0, "", "")
 			command := deferredPowerShellCommand(script)
 			cmd := exec.CommandContext(ctx, command.Path, command.Args[1:]...)
 			cmd.SysProcAttr = command.SysProcAttr
 			if output, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("replacement failed: %v\n%s", err, output)
+				t.Fatalf("replacement failed: %v (context: %v)\n%s", err, ctx.Err(), output)
 			}
 			got, err := os.ReadFile(target)
 			if err != nil || string(got) != "new" {
@@ -91,7 +94,7 @@ func TestDeferredWindowsSelfUpdateWritesVersionAfterReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = holder.Wait()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(windowsReplaceTestTimeout)
 	for time.Now().Before(deadline) {
 		got, _ := os.ReadFile(versionPath)
 		if strings.TrimSpace(string(got)) == "0.2.20" {
@@ -106,5 +109,5 @@ func TestDeferredWindowsSelfUpdateWritesVersionAfterReplacement(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatal("deferred update did not finish after process exit")
+	t.Fatalf("deferred update did not finish within %s after process exit", windowsReplaceTestTimeout)
 }
