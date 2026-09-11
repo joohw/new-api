@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -121,15 +122,15 @@ func Update(ctx context.Context, execPath string, opts Options) (Result, error) 
 		LatestVersion:  latest,
 		TargetPath:     target,
 	}
+	installed := readInstalledVersion(ctx, target, execPath, current)
 	if current != "" && current != "dev" && current == latest && !opts.InPlace {
-		if sameInstalledBinary(target, execPath) || readInstalledVersion() == latest {
+		if installed == latest {
 			res.UpToDate = true
 			return res, nil
 		}
 	}
 	if opts.CheckOnly {
-		installed := readInstalledVersion()
-		res.UpToDate = (current != "" && current != "dev" && current == latest) || installed == latest
+		res.UpToDate = installed == latest
 		return res, nil
 	}
 
@@ -146,10 +147,7 @@ func Update(ctx context.Context, execPath string, opts Options) (Result, error) 
 		return res, err
 	}
 	defer unlock()
-	if err := installBinary(binary, target, execPath); err != nil {
-		return res, err
-	}
-	if err := writeVersionMeta(latest); err != nil {
+	if err := installBinary(binary, target, execPath, latest); err != nil {
 		return res, err
 	}
 	res.Updated = true
@@ -180,16 +178,23 @@ func acquireInstallLock() (func(), error) {
 	return nil, fmt.Errorf("timed out waiting for install lock: %s", path)
 }
 
-func readInstalledVersion() string {
-	path, err := config.CliVersionMetaPath()
+func readInstalledVersion(ctx context.Context, target, execPath, current string) string {
+	if sameInstalledBinary(target, execPath) {
+		return current
+	}
+	// version.txt can describe a deferred Windows update that never replaced
+	// the binary. Ask the target itself before declaring it up to date.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	data, err := exec.CommandContext(ctx, target, "version").Output()
 	if err != nil {
 		return ""
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
+	fields := strings.Fields(strings.SplitN(string(data), "\n", 2)[0])
+	if len(fields) != 2 || fields[0] != "clovapi" {
 		return ""
 	}
-	return strings.TrimSpace(string(data))
+	return strings.TrimPrefix(fields[1], "v")
 }
 
 func sameInstalledBinary(target, execPath string) bool {

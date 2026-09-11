@@ -121,7 +121,7 @@ func encodeResponseOpenAIChat(events []ResponseEvent) ([]byte, error) {
 		if text == "" {
 			message["content"] = nil
 		}
-		if f := strings.TrimSpace(strings.ToLower(finish)); f == "" || f == "stop" || f == "end_turn" || f == "tool_use" {
+		if f := strings.TrimSpace(strings.ToLower(finish)); f == "" || f == "stop" || f == "end_turn" || f == "completed" || f == "tool_use" {
 			finish = "tool_calls"
 		}
 	}

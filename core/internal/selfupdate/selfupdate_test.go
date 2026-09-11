@@ -2,6 +2,7 @@ package selfupdate
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -13,15 +14,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
+	"github.com/clovapi/switcher/internal/buildinfo"
 	cfgpkg "github.com/clovapi/switcher/internal/config"
 )
 
 func TestUpdateInstallsIntoConfigBin(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("tar.gz release test skipped on windows")
-	}
 	dir := t.TempDir()
 	cfgpkg.SetDirOverride(dir)
 	t.Cleanup(func() { cfgpkg.SetDirOverride("") })
@@ -33,6 +33,10 @@ func TestUpdateInstallsIntoConfigBin(t *testing.T) {
 	}
 	archiveName := fmt.Sprintf("clovapi_0.1.99_%s_%s.tar.gz", osName, archName)
 	archiveBytes := tarGzWithFile(t, "clovapi", binary)
+	if runtime.GOOS == "windows" {
+		archiveName = fmt.Sprintf("clovapi_0.1.99_%s_%s.zip", osName, archName)
+		archiveBytes = zipWithFile(t, "clovapi.exe", binary)
+	}
 	sum := sha256.Sum256(archiveBytes)
 	checksums := hex.EncodeToString(sum[:]) + "  " + archiveName + "\n"
 
@@ -71,9 +75,36 @@ func TestUpdateInstallsIntoConfigBin(t *testing.T) {
 	if !bytes.Equal(got, binary) {
 		t.Fatalf("installed binary mismatch")
 	}
+	versionPath, err := cfgpkg.CliVersionMetaPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, err := os.ReadFile(versionPath)
+	if err != nil || strings.TrimSpace(string(version)) != "0.1.99" {
+		t.Fatalf("installed version = %q, err = %v", version, err)
+	}
+}
+
+func zipWithFile(t *testing.T, name string, content []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	f, err := w.Create(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }
 
 func TestUpdateCheckOnly(t *testing.T) {
+	cfgpkg.SetDirOverride(t.TempDir())
+	t.Cleanup(func() { cfgpkg.SetDirOverride("") })
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("v9.9.9"))
 	}))
@@ -86,6 +117,48 @@ func TestUpdateCheckOnly(t *testing.T) {
 	}
 	if res.LatestVersion != "9.9.9" {
 		t.Fatalf("latest = %q", res.LatestVersion)
+	}
+}
+
+func TestUpdateCheckDoesNotTrustStaleVersionMeta(t *testing.T) {
+	cfgpkg.SetDirOverride(t.TempDir())
+	t.Cleanup(func() { cfgpkg.SetDirOverride("") })
+	previousVersion := buildinfo.Version
+	buildinfo.Version = "0.2.18"
+	t.Cleanup(func() { buildinfo.Version = previousVersion })
+	if err := writeVersionMeta("0.2.20"); err != nil {
+		t.Fatal(err)
+	}
+	target, err := cfgpkg.CliBinPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := Update(context.Background(), target, Options{CheckOnly: true, VersionTag: "0.2.20"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.UpToDate {
+		t.Fatal("stale metadata hid an update required by the running binary")
+	}
+}
+
+func TestUpdateDoesNotSkipMissingTargetWithStaleVersionMeta(t *testing.T) {
+	cfgpkg.SetDirOverride(t.TempDir())
+	t.Cleanup(func() { cfgpkg.SetDirOverride("") })
+	previousVersion := buildinfo.Version
+	buildinfo.Version = "0.2.20"
+	t.Cleanup(func() { buildinfo.Version = previousVersion })
+	if err := writeVersionMeta("0.2.20"); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "offline fixture", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	t.Setenv("CLOVAPI_CLI_BASE_URL", srv.URL)
+	res, err := Update(context.Background(), filepath.Join(t.TempDir(), "other-clovapi"), Options{VersionTag: "0.2.20"})
+	if err == nil || res.UpToDate {
+		t.Fatalf("expected a download attempt for missing target, got %+v, %v", res, err)
 	}
 }
 

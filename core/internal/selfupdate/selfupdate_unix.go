@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-func installBinary(data []byte, targetPath, execPath string) error {
+func installBinary(data []byte, targetPath, execPath, version string) error {
 	_ = execPath
 	targetPath = strings.TrimSpace(targetPath)
 	if targetPath == "" {
@@ -45,5 +45,5 @@ func installBinary(data []byte, targetPath, execPath string) error {
 			return err
 		}
 	}
-	return nil
+	return writeVersionMeta(version)
 }
